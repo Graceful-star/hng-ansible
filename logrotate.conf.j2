@@ -1,0 +1,13 @@
+/var/log/stage_5b/*.log {
+    daily 
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 640 hng hng
+    sharedscripts
+    postrotate
+        /usr/bin/killall -HUP hng_boilerplate_golang_web  # Adjust if needed
+    endscript
+}

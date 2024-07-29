@@ -1,0 +1,78 @@
+---
+- name: Deploy GoLang Web Boilerplate
+  hosts: hng
+  become: yes
+
+  tasks:
+    - name: Create 'hng' user with sudo privileges
+      user:
+        name: hng
+        createhome: yes
+        groups: sudo
+        shell: /bin/bash
+
+    - name: Create directory for the project
+      file:
+        path: /opt/stage_5b
+        state: directory
+        owner: hng
+        group: hng
+        mode: '0755'
+
+    - name: Clone repository
+      git:
+        repo: 'https://github.com/hngprojects/hng_boilerplate_golang_web.git'
+        dest: /opt/stage_5b
+        version: devops
+        force: yes
+
+    - name: Install dependencies (Go and Nginx)
+      apt:
+        name:
+          - git
+          - golang
+          - nginx
+
+    - name: Build Go application
+      command: go build
+      args:
+        chdir: /opt/stage_5b
+
+    - name: Run Go application
+      command: ./hng_boilerplate_golang_web &  # Run in the background
+      args:
+        chdir: /opt/stage_5b
+
+    - name: Configure Nginx reverse proxy
+      template:
+        src: nginx.conf.j2
+        dest: /etc/nginx/sites-available/hng_boilerplate_golang_web
+      notify:
+        - Reload Nginx
+
+    - name: Enable Nginx site
+      file:
+        src: /etc/nginx/sites-available/hng_boilerplate_golang_web
+        dest: /etc/nginx/sites-enabled/hng_boilerplate_golang_web
+        state: link
+
+    - name: Create log directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: hng
+        group: hng
+        mode: '0755'
+      loop:
+        - /var/log/stage_5b/
+
+    - name: Configure log rotation
+      template:
+        src: logrotate.conf.j2
+        dest: /etc/logrotate.d/hng_boilerplate_golang_web
+
+  handlers:
+    - name: Reload Nginx
+      service:
+        name: nginx
+        state: reloaded

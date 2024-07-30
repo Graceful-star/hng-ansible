@@ -1,78 +1,169 @@
+
+      
 ---
-- name: Deploy GoLang Web Boilerplate
+- name: Deploy Golang boilerplate application
   hosts: hng
   become: yes
 
+  vars:
+    app_dir: /opt/stage_5b
+    log_dir: /var/log/stage_5b
+    db_password: "{{ lookup('password', '/dev/null chars=ascii_letters,digits length=20') }}"
+    repo_url: "https://github.com/hngprojects/hng_boilerplate_golang_web"
+
   tasks:
-    - name: Create 'hng' user with sudo privileges
+    - name: Create hng user
       user:
         name: hng
-        createhome: yes
         groups: sudo
         shell: /bin/bash
 
-    - name: Create directory for the project
-      file:
-        path: /opt/stage_5b
-        state: directory
-        owner: hng
-        group: hng
-        mode: '0755'
-
-    - name: Clone repository
-      git:
-        repo: 'https://github.com/hngprojects/hng_boilerplate_golang_web.git'
-        dest: /opt/stage_5b
-        version: devops
-        force: yes
-
-    - name: Install dependencies (Go and Nginx)
+    - name: Install required packages
       apt:
         name:
           - git
+          - postgresql
+          - postgresql-contrib
           - golang
-          - nginx
+        state: present
+        update_cache: yes
 
-    - name: Build Go application
-      command: go build
-      args:
-        chdir: /opt/stage_5b
+    - name: Install Nginx 1.26
+      block:
+        - name: Add Nginx signing key
+          apt_key:
+            url: https://nginx.org/keys/nginx_signing.key
+            state: present
 
-    - name: Run Go application
-      command: ./hng_boilerplate_golang_web &  # Run in the background
-      args:
-        chdir: /opt/stage_5b
+        - name: Add Nginx repository
+          apt_repository:
+            repo: deb https://nginx.org/packages/ubuntu/ jammy nginx
+            state: present
+            filename: nginx
 
-    - name: Configure Nginx reverse proxy
-      template:
-        src: nginx.conf.j2
-        dest: /etc/nginx/sites-available/hng_boilerplate_golang_web
-      notify:
-        - Reload Nginx
+        - name: Install Nginx 1.26
+          apt:
+            name: nginx=1.26.*
+            state: present
+            update_cache: yes
 
-    - name: Enable Nginx site
+    - name: Clone repository
+      git:
+        repo: "{{ repo_url }}"
+        version: devops
+        dest: "{{ app_dir }}"
+
+    - name: Set ownership of app directory
       file:
-        src: /etc/nginx/sites-available/hng_boilerplate_golang_web
-        dest: /etc/nginx/sites-enabled/hng_boilerplate_golang_web
-        state: link
+        path: "{{ app_dir }}"
+        owner: hng
+        group: hng
+        recurse: yes
 
-    - name: Create log directories
+    - name: Build Golang application
+      shell: |
+        cd {{ app_dir }}
+        go build -o app
+      become: yes
+      become_user: root
+
+    - name: Set ownership of built application
       file:
-        path: "{{ item }}"
+        path: "{{ app_dir }}/app"
+        owner: hng
+        group: hng
+        mode: '0755'
+
+    - name: Set up PostgreSQL
+      block:
+        - name: Create PostgreSQL database
+          command: createdb boilerplate_db
+          become: yes
+          become_user: postgres
+
+        - name: Create PostgreSQL user
+          command: psql -c "CREATE USER boilerplate_user WITH PASSWORD '{{ db_password }}' CREATEDB;"
+          become: yes
+          become_user: postgres
+
+        - name: Save PostgreSQL credentials
+          copy:
+            content: "Username: boilerplate_user\nPassword: {{ db_password }}"
+            dest: /var/secrets/pg_pw.txt
+            mode: '0600'
+
+    - name: Set up RabbitMQ
+      apt:
+        name: rabbitmq-server
+        state: present
+
+    - name: Configure Nginx
+      copy:
+        content: |
+          server {
+              listen 80;
+              server_name _;
+
+              location / {
+                  proxy_pass http://127.0.0.1:3000;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+              }
+          }
+        dest: /etc/nginx/conf.d/default.conf
+      notify: Reload Nginx
+
+    - name: Create log directory
+      file:
+        path: "{{ log_dir }}"
         state: directory
         owner: hng
         group: hng
         mode: '0755'
-      loop:
-        - /var/log/stage_5b/
 
-    - name: Configure log rotation
-      template:
-        src: logrotate.conf.j2
-        dest: /etc/logrotate.d/hng_boilerplate_golang_web
+    - name: Set up application service
+      copy:
+        content: |
+          [Unit]
+          Description=Golang Boilerplate Application
+          After=network.target
+
+          [Service]
+          User=hng
+          WorkingDirectory={{ app_dir }}
+          Environment="PORT=3000"
+          Environment="DATABASE_URL=postgresql://boilerplate_user:{{ db_password }}@localhost/boilerplate_db"
+          Environment="RABBITMQ_URL=amqp://localhost"
+          ExecStart={{ app_dir }}/app
+          Restart=always
+          StandardOutput=append:{{ log_dir }}/out.log
+          StandardError=append:{{ log_dir }}/error.log
+
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/boilerplate_app.service
+      notify: Restart application
+
+    - name: Enable and start application service
+      systemd:
+        name: boilerplate_app
+        enabled: yes
+        state: started
+
+    - name: Enable and start Nginx
+      systemd:
+        name: nginx
+        enabled: yes
+        state: started
 
   handlers:
     - name: Reload Nginx
-      service:
+      systemd:
         name: nginx
         state: reloaded
+
+    - name: Restart application
+      systemd:
+        name: boilerplate_app
+        state: restarted
+        daemon_reload: yes

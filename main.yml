@@ -21,7 +21,6 @@
           - git
           - postgresql
           - postgresql-contrib
-          - golang
         state: present
         update_cache: yes
 
@@ -42,22 +41,41 @@
             state: present
             update_cache: yes
 
-    - name: Ensure Go 1.20 is installed
+    - name: Remove any existing Go installations
       apt:
-        name: golang-1.20
-        state: present
-        update_cache: yes
+        name: golang*
+        state: absent
+
+    - name: Download Go 1.20
+      get_url:
+        url: https://golang.org/dl/go1.20.linux-amd64.tar.gz
+        dest: /tmp/go1.20.linux-amd64.tar.gz
+
+    - name: Extract Go 1.20
+      unarchive:
+        src: /tmp/go1.20.linux-amd64.tar.gz
+        dest: /usr/local
+        remote_src: yes
 
     - name: Set up Go environment
       lineinfile:
         path: /etc/profile.d/go.sh
-        line: 'export PATH=$PATH:/usr/lib/go-1.20/bin'
+        line: 'export PATH=$PATH:/usr/local/go/bin'
         create: yes
 
     - name: Source Go environment
       shell: source /etc/profile.d/go.sh
       args:
         executable: /bin/bash
+
+    - name: Verify Go installation
+      shell: /usr/local/go/bin/go version
+      register: go_version
+      changed_when: false
+
+    - name: Display Go version
+      debug:
+        var: go_version.stdout
 
     - name: Set Git safe directory
       command: git config --global --add safe.directory {{ app_dir }}
@@ -88,9 +106,14 @@
       become: yes
       shell: |
         cd {{ app_dir }}
-        go build -buildvcs=false -o app
+        /usr/local/go/bin/go build -buildvcs=false -o app
       environment:
-        PATH: "{{ ansible_env.PATH }}:/usr/lib/go-1.20/bin"
+        PATH: "{{ ansible_env.PATH }}:/usr/local/go/bin"
+      register: build_output
+
+    - name: Display build output
+      debug:
+        var: build_output
 
     - name: Set ownership of built application
       become: yes

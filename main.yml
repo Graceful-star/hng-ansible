@@ -2,7 +2,6 @@
 - name: Deploy Golang boilerplate application
   hosts: hng
   become: yes
-
   vars:
     app_dir: /opt/stage_5b
     log_dir: /var/log/stage_5b
@@ -32,24 +31,51 @@
           apt_key:
             url: https://nginx.org/keys/nginx_signing.key
             state: present
-
         - name: Add Nginx repository
           apt_repository:
             repo: deb https://nginx.org/packages/ubuntu/ jammy nginx
             state: present
             filename: nginx
-
         - name: Install Nginx 1.26
           apt:
             name: nginx=1.26.*
             state: present
             update_cache: yes
 
+    - name: Ensure Go 1.20 is installed
+      apt:
+        name: golang-1.20
+        state: present
+        update_cache: yes
+
+    - name: Set up Go environment
+      lineinfile:
+        path: /etc/profile.d/go.sh
+        line: 'export PATH=$PATH:/usr/lib/go-1.20/bin'
+        create: yes
+
+    - name: Source Go environment
+      shell: source /etc/profile.d/go.sh
+      args:
+        executable: /bin/bash
+
+    - name: Set Git safe directory
+      command: git config --global --add safe.directory {{ app_dir }}
+
+    - name: Ensure app directory exists
+      file:
+        path: "{{ app_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
     - name: Clone repository
       git:
         repo: "{{ repo_url }}"
         version: devops
         dest: "{{ app_dir }}"
+        force: yes
 
     - name: Set ownership of app directory
       file:
@@ -59,36 +85,55 @@
         recurse: yes
 
     - name: Build Golang application
+      become: yes
       shell: |
         cd {{ app_dir }}
-        go build -o app
-      become: yes
-      become_user: root
+        go build -buildvcs=false -o app
+      environment:
+        PATH: "{{ ansible_env.PATH }}:/usr/lib/go-1.20/bin"
 
     - name: Set ownership of built application
+      become: yes
       file:
         path: "{{ app_dir }}/app"
         owner: hng
         group: hng
         mode: '0755'
 
-    - name: Set up PostgreSQL
-      block:
-        - name: Create PostgreSQL database
-          command: createdb boilerplate_db
-          become: yes
-          become_user: postgres
+    - name: Install PostgreSQL Python package
+      apt:
+        name: python3-psycopg2
+        state: present
 
-        - name: Create PostgreSQL user
-          command: psql -c "CREATE USER boilerplate_user WITH PASSWORD '{{ db_password }}' CREATEDB;"
-          become: yes
-          become_user: postgres
+    - name: Create PostgreSQL database
+      become: yes
+      shell: su - postgres -c "psql -c \"CREATE DATABASE boilerplate_db;\""
+      register: create_db
+      failed_when: create_db.rc != 0 and "already exists" not in create_db.stderr
 
-        - name: Save PostgreSQL credentials
-          copy:
-            content: "Username: boilerplate_user\nPassword: {{ db_password }}"
-            dest: /var/secrets/pg_pw.txt
-            mode: '0600'
+    - name: Create PostgreSQL user
+      become: yes
+      shell: su - postgres -c "psql -c \"CREATE USER boilerplate_user WITH PASSWORD '{{ db_password }}' CREATEDB;\""
+      register: create_user
+      failed_when: create_user.rc != 0 and "already exists" not in create_user.stderr
+
+    - name: Grant privileges to user
+      become: yes
+      shell: su - postgres -c "psql -c \"GRANT ALL PRIVILEGES ON DATABASE boilerplate_db TO boilerplate_user;\""
+
+    - name: Ensure /var/secrets directory exists
+      become: yes
+      file:
+        path: /var/secrets
+        state: directory
+        mode: '0700'
+
+    - name: Save PostgreSQL credentials
+      become: yes
+      copy:
+        content: "Username: boilerplate_user\nPassword: {{ db_password }}"
+        dest: /var/secrets/pg_pw.txt
+        mode: '0600'
 
     - name: Set up RabbitMQ
       apt:
@@ -101,7 +146,6 @@
           server {
               listen 80;
               server_name _;
-
               location / {
                   proxy_pass http://127.0.0.1:3000;
                   proxy_set_header Host $host;

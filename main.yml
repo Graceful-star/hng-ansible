@@ -5,8 +5,8 @@
   vars:
     app_dir: /opt/stage_5b
     log_dir: /var/log/stage_5b
-    db_password: "{{ lookup('password', '/dev/null chars=ascii_letters,digits length=20') }}"
     repo_url: "https://github.com/hngprojects/hng_boilerplate_golang_web"
+    db_password: password
 
   tasks:
     - name: Create hng user
@@ -94,6 +94,11 @@
         version: devops
         dest: "{{ app_dir }}"
         force: yes
+    
+    - name: copy .env file to the app directory    
+      copy:                                       
+        src: app-sample.env                        
+        dest: /opt/stage_5b/app.env               
 
     - name: Set ownership of app directory
       file:
@@ -127,23 +132,82 @@
       apt:
         name: python3-psycopg2
         state: present
+ 
+    - name: Install ACL, required for Ansible Super User
+      apt: 
+        name: acl 
+        state: present 
+        
+    - name: Check if PostgreSQL data directory is initialized
+      stat:
+        path: /var/lib/postgresql/14/main/PG_VERSION
+      register: pg_version_file
 
+    - name: Display initialization status
+      debug:
+        msg: "PostgreSQL data directory is initialized."
+      when: pg_version_file.stat.exists
+
+    - name: Re-initialize PostgreSQL data directory if not initialized
+      shell: /usr/lib/postgresql/14/bin/initdb -D /var/lib/postgresql/14/main
+      when: not pg_version_file.stat.exists
+      become_user: postgres
+
+    - name: Configure PostgreSQL authentication to use md5            
+      lineinfile:
+        path: /etc/postgresql/14/main/pg_hba.conf
+        regexp: '^local\s+all\s+all\s+peer$'
+        line: 'local   all             all                                     md5'
+        state: present
+      become_user: postgres
+      notify: Restart postgres
+
+    - name: Allow remote connections in pg_hba.conf
+      lineinfile:
+        path: "/etc/postgresql/14/main/pg_hba.conf"
+        regexp: '^host\s+all\s+all\s+127.0.0.1/32\s+md5$'
+        line: 'host    all             all             0.0.0.0/0               md5'
+        state: present
+      become_user: postgres
+      notify: Restart postgres
+
+    - name: Configure PostgreSQL to listen on all addresses
+      lineinfile:
+        path: "/etc/postgresql/14/main/postgresql.conf"
+        regexp: '^#listen_addresses =.*'
+        line: "listen_addresses = '*'"
+        state: present
+      become_user: postgres
+      notify: Restart postgres
+
+    - name: Reload PostgreSQL configuration
+      service:
+        name: postgresql
+        state: reloaded
+        
     - name: Create PostgreSQL database
-      become: yes
-      shell: su - postgres -c "psql -c \"CREATE DATABASE boilerplate_db;\""
-      register: create_db
-      failed_when: create_db.rc != 0 and "already exists" not in create_db.stderr
+      postgresql_db:
+        name: boilerplate_db
+        state: present
+      become_user: postgres
 
     - name: Create PostgreSQL user
-      become: yes
-      shell: su - postgres -c "psql -c \"CREATE USER boilerplate_user WITH PASSWORD '{{ db_password }}' CREATEDB;\""
-      register: create_user
-      failed_when: create_user.rc != 0 and "already exists" not in create_user.stderr
+      postgresql_user:
+        name: boilerplate_user
+        db: boilerplate_db
+        password: "{{ db_password }}"
+        state: present
+      become_user: postgres
 
     - name: Grant privileges to user
-      become: yes
-      shell: su - postgres -c "psql -c \"GRANT ALL PRIVILEGES ON DATABASE boilerplate_db TO boilerplate_user;\""
-
+      postgresql_privs:
+        type: database
+        database: boilerplate_db
+        roles: boilerplate_user
+        priv: ALL
+        grant_option: false
+      become_user: postgres
+      
     - name: Ensure /var/secrets directory exists
       become: yes
       file:
@@ -222,6 +286,11 @@
         state: started
 
   handlers:
+    - name: Restart postgres
+      systemd:
+        name: postgresql
+        state: restarted
+
     - name: Reload Nginx
       systemd:
         name: nginx
